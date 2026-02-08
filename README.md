@@ -50,6 +50,42 @@ Accelerometer configuration for resonance testing:
 - **Type**: EI (Exponential Input)
 - **Frequency**: 38Hz (X and Y axes)
 
+## Using The Accelerometer (Resonance Testing)
+
+The accelerometer is not always connected. In `printer.cfg` the include for `accelerometer.cfg` is intentionally commented out.
+
+Enable it when the sensor is plugged in:
+1. Connect the USB accelerometer
+2. Edit `printer.cfg` and uncomment the line:
+   - `# [include accelerometer.cfg]`
+3. Restart Klipper
+
+Verify the sensor is working:
+```gcode
+ACCELEROMETER_QUERY
+```
+
+Measure baseline noise:
+```gcode
+MEASURE_AXES_NOISE
+```
+
+Run resonance tests (example):
+```gcode
+TEST_RESONANCES AXIS=X
+TEST_RESONANCES AXIS=Y
+```
+
+Generate new input shaper values:
+```gcode
+SHAPER_CALIBRATE
+SAVE_CONFIG
+```
+
+Disable it again when done (so Klipper will start without the sensor):
+- Re-comment the `include accelerometer.cfg` line in `printer.cfg`
+- Restart Klipper
+
 ### Probe Settings
 - **Z Offset**: 24.5mm
 - **Speed**: 5mm/s

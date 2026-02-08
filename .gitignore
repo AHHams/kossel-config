@@ -4,6 +4,7 @@
 *.backup
 *.old
 *.orig
+printer-*.cfg
 
 # Klipper specific
 *.log
