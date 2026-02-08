@@ -1,0 +1,54 @@
+# Backup files
+*.bkp
+*.bak
+*.backup
+*.old
+*.orig
+
+# Klipper specific
+*.log
+*.tmp
+*.cache
+klippy.log
+klippy.log.*
+
+# Debian/Ubuntu system files
+*~
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.pid
+*.lock
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+.atom/
+.brackets.json
+
+# Configuration overrides
+printer-*.cfg
+overrides.cfg
+
+# Sensitive data
+*.key
+*.pem
+*.crt
+secrets.cfg
+passwords.cfg
+
+# Build artifacts
+*.o
+*.so
+*.a
+*.out
+*.bin
+*.hex
+*.elf
+
+# Temporary files
+tmp/
+temp/
+.cache/
