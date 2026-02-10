@@ -158,7 +158,7 @@ Note: `config/printer.cfg` includes Mainsail macros via an absolute path:
 KIAUH is interactive, so the normal flow is:
 
 1) Flash the Pi and enable SSH + Wi-Fi (Raspberry Pi Imager).
-2) Run the Ansible playbook (installs packages, stabilizes Wi-Fi, clones KIAUH and this repo, installs opencode):
+2) Run the Ansible playbook (installs packages, stabilizes Wi-Fi, clones KIAUH and this repo):
 
 ```bash
 ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klipper-setup.yml

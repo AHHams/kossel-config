@@ -25,11 +25,6 @@
     git_user_name: "Anthony Hams"
     git_user_email: "anthony@hams.nl"
 
-    # ---- OpenCode (opencode) ----
-    opencode_install: true
-    opencode_install_method: "official_script"  # "official_script" or "skip"
-    opencode_force_install: false
-
     # ---- Locale ----
     locale_lang: "en_US.UTF-8"
 
@@ -166,11 +161,10 @@
         state: started
       when: nm_active.stdout | default('') != 'active'
 
-    - name: Tune Wi-Fi connection via NetworkManager (5 GHz + no powersave)
+    - name: Tune Wi-Fi connection via NetworkManager (no powersave)
       become: true
       when:
         - wifi_manage | bool
-        - (wifi_psk | length) > 0
         - nm_active.stdout | default('') == 'active'
       block:
         - name: Get active wlan0 connection name
@@ -376,31 +370,6 @@
       ansible.builtin.command: "git config --global user.email {{ git_user_email | quote }}"
       changed_when: false
       when: manage_git_identity | bool
-
-    - name: Check if opencode is already installed (official path)
-      become: true
-      become_user: "{{ klipper_user }}"
-      ansible.builtin.stat:
-        path: "{{ klipper_home }}/.opencode/bin/opencode"
-      register: opencode_official
-      when:
-        - opencode_install | bool
-        - opencode_install_method == 'official_script'
-
-    - name: Install opencode (official installer)
-      become: true
-      become_user: "{{ klipper_user }}"
-      ansible.builtin.shell: |
-        set -euo pipefail
-        curl -fsSL https://opencode.ai/install | bash
-      args:
-        executable: /bin/bash
-      environment:
-        SHELL: /bin/bash
-      when:
-        - opencode_install | bool
-        - opencode_install_method == 'official_script'
-        - opencode_force_install | bool or not opencode_official.stat.exists
 
     # ---- SD longevity / stability ----
     - name: Disable swap service
