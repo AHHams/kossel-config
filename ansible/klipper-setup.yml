@@ -1,0 +1,398 @@
+---
+- name: Prepare Raspberry Pi OS Lite for Klipper and stabilize Wi-Fi
+  hosts: klipper
+  become: true
+  gather_facts: true
+
+  vars:
+    klipper_user: "anthony"
+    klipper_home: "/home/{{ klipper_user }}"
+    kiauh_dir: "{{ klipper_home }}/kiauh"
+
+    # ---- This repo (kossel-config) ----
+    kossel_config_repo: "git@github.com:AHHams/kossel-config.git"
+    kossel_config_version: "main"
+    kossel_config_dir: "{{ klipper_home }}/kossel-config"
+    manage_printer_data_config_symlink: true
+
+    # ---- Git identity ----
+    # NOTE: I am intentionally not applying these automatically.
+    # <git config lines here>
+    #   git config --global user.name "Anthony Hams"
+    #   git config --global user.email "anthony@hams.nl"
+
+    # ---- OpenCode (opencode) ----
+    # Installs a prebuilt binary into ~/.local/bin for the klipper_user.
+    opencode_install: true
+
+    # KIAUH is interactive; keep this false for reliability.
+    kiauh_auto_install: false
+
+    # ---- Wi-Fi stabilization (Pi-side) ----
+    wifi_manage: true
+    wifi_country: "MX"
+    wifi_ssid: "hams"
+    wifi_psk: ""              # set to your plaintext WPA2 password if you want Ansible to manage Wi-Fi
+    wifi_bssid: ""            # optional: pin to AP MAC like "60:22:32:20:64:a3"
+    wifi_force_5ghz: true     # uses freq_list to prefer 5 GHz
+    wifi_disable_powersave: true
+
+    apt_packages:
+      - git
+      - curl
+      - wget
+      - ca-certificates
+      - unzip
+      - rsync
+      - vim
+      - htop
+      - tmux
+
+      - python3
+      - python3-pip
+      - python3-venv
+      - python3-dev
+
+      - build-essential
+      - pkg-config
+      - cmake
+      - make
+      - gcc
+      - g++
+      - gfortran
+
+      - libopenblas-dev
+      - libatlas-base-dev
+      - liblapack-dev
+      - libffi-dev
+      - libfreetype6-dev
+      - libpng-dev
+
+      - libusb-1.0-0
+      - libusb-1.0-0-dev
+
+      - cpufrequtils
+
+      # Wi-Fi tooling (Pi OS Lite is often minimal)
+      - iw
+      - wireless-tools
+      - wpasupplicant
+      - rfkill
+
+  handlers:
+    - name: restart_wpa
+      ansible.builtin.systemd:
+        name: wpa_supplicant
+        state: restarted
+      ignore_errors: true
+
+    - name: restart_dhcpcd
+      ansible.builtin.systemd:
+        name: dhcpcd
+        state: restarted
+      ignore_errors: true
+
+    - name: reboot_if_needed
+      ansible.builtin.reboot:
+        msg: "Reboot initiated by Ansible"
+        reboot_timeout: 600
+
+  tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: apt full-upgrade
+      ansible.builtin.apt:
+        upgrade: full
+      register: upgrade_result
+
+    - name: Install baseline packages
+      ansible.builtin.apt:
+        name: "{{ apt_packages }}"
+        state: present
+
+    - name: Determine opencode release arch
+      ansible.builtin.set_fact:
+        opencode_arch: >-
+          {{
+            'arm64' if ansible_architecture in ['aarch64', 'arm64'] else
+            ('x86_64' if ansible_architecture in ['x86_64', 'amd64'] else
+            ('i386' if ansible_architecture in ['i386', 'i686'] else ansible_architecture))
+          }}
+      when: opencode_install | bool
+
+    - name: Install opencode (binary release)
+      become: true
+      become_user: "{{ klipper_user }}"
+      block:
+        - name: Ensure ~/.local/bin exists
+          ansible.builtin.file:
+            path: "{{ klipper_home }}/.local/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Download opencode release tarball
+          ansible.builtin.get_url:
+            url: "https://github.com/opencode-ai/opencode/releases/latest/download/opencode-linux-{{ opencode_arch }}.tar.gz"
+            dest: "/tmp/opencode-linux-{{ opencode_arch }}.tar.gz"
+            mode: "0644"
+
+        - name: Unpack opencode
+          ansible.builtin.unarchive:
+            src: "/tmp/opencode-linux-{{ opencode_arch }}.tar.gz"
+            dest: "/tmp/opencode-unpack"
+            remote_src: true
+
+        - name: Install opencode into ~/.local/bin
+          ansible.builtin.copy:
+            src: "/tmp/opencode-unpack/opencode"
+            dest: "{{ klipper_home }}/.local/bin/opencode"
+            mode: "0755"
+            remote_src: true
+      when:
+        - opencode_install | bool
+        - opencode_arch in ['arm64', 'x86_64', 'i386']
+
+    - name: Note if opencode arch is unsupported
+      ansible.builtin.debug:
+        msg:
+          - "Skipping opencode install: unsupported architecture '{{ ansible_architecture }}'."
+          - "Arch mapping: '{{ opencode_arch | default('unset') }}'"
+          - "Supported by upstream releases: arm64, x86_64, i386."
+      when:
+        - opencode_install | bool
+        - opencode_arch is defined
+        - opencode_arch not in ['arm64', 'x86_64', 'i386']
+
+    # ---- SD longevity / stability ----
+    - name: Disable swap service
+      ansible.builtin.systemd:
+        name: dphys-swapfile
+        enabled: false
+        state: stopped
+      ignore_errors: true
+
+    - name: swapoff (ok if already off)
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+      failed_when: false
+
+    - name: Limit journald size
+      ansible.builtin.file:
+        path: /etc/systemd/journald.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: Write journald size limit
+      ansible.builtin.copy:
+        dest: /etc/systemd/journald.conf.d/size.conf
+        mode: "0644"
+        content: |
+          [Journal]
+          SystemMaxUse=50M
+
+    - name: Disable optional services (safe)
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+      loop:
+        - triggerhappy
+        - avahi-daemon
+        - bluetooth
+      ignore_errors: true
+
+    - name: Set CPU governor to performance
+      ansible.builtin.copy:
+        dest: /etc/default/cpufrequtils
+        mode: "0644"
+        content: |
+          GOVERNOR="performance"
+
+    - name: Enable cpufrequtils
+      ansible.builtin.systemd:
+        name: cpufrequtils
+        enabled: true
+        state: started
+      ignore_errors: true
+
+    - name: Reboot after upgrades (if needed)
+      ansible.builtin.reboot:
+        msg: "Reboot after apt full-upgrade"
+        reboot_timeout: 600
+      when: upgrade_result is changed
+
+    # ---- KIAUH ----
+    - name: Clone KIAUH
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.git:
+        repo: "https://github.com/dw-0/kiauh.git"
+        dest: "{{ kiauh_dir }}"
+        version: master
+        update: true
+
+    - name: Clone kossel-config
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.git:
+        repo: "{{ kossel_config_repo }}"
+        dest: "{{ kossel_config_dir }}"
+        version: "{{ kossel_config_version }}"
+        update: true
+        accept_hostkey: true
+
+    - name: Optional note about running KIAUH
+      ansible.builtin.debug:
+        msg:
+          - "KIAUH cloned to {{ kiauh_dir }}."
+          - "Run manually: cd ~/kiauh && ./kiauh.sh (install Klipper, Moonraker, Mainsail)"
+          - "kossel-config cloned to {{ kossel_config_dir }}."
+      when: not (kiauh_auto_install | bool)
+
+    - name: Check if printer_data exists (created by Klipper install)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.stat:
+        path: "{{ klipper_home }}/printer_data"
+        follow: false
+      register: printer_data_dir
+      when: manage_printer_data_config_symlink | bool
+
+    - name: Note about creating printer_data/config symlink
+      ansible.builtin.debug:
+        msg:
+          - "{{ klipper_home }}/printer_data not found yet."
+          - "Install Klipper/Moonraker/Mainsail via KIAUH first, then re-run this playbook to create the config symlink."
+      when:
+        - manage_printer_data_config_symlink | bool
+        - not printer_data_dir.stat.exists
+
+    - name: Check existing printer_data/config
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.stat:
+        path: "{{ klipper_home }}/printer_data/config"
+        follow: false
+      register: printer_data_config
+      when:
+        - manage_printer_data_config_symlink | bool
+        - printer_data_dir.stat.exists
+
+    - name: Symlink printer_data/config to kossel-config/config (when missing)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.file:
+        src: "{{ kossel_config_dir }}/config"
+        dest: "{{ klipper_home }}/printer_data/config"
+        state: link
+      when:
+        - manage_printer_data_config_symlink | bool
+        - printer_data_dir.stat.exists
+        - not printer_data_config.stat.exists
+
+    - name: Determine existing printer_data/config type
+      ansible.builtin.set_fact:
+        printer_data_config_type: >-
+          {{
+            'symlink' if printer_data_config.stat.islnk else
+            ('directory' if printer_data_config.stat.isdir else 'file')
+          }}
+      when:
+        - manage_printer_data_config_symlink | bool
+        - printer_data_dir.stat.exists
+        - printer_data_config.stat.exists
+
+    - name: Warn if printer_data/config exists and is not the expected symlink
+      ansible.builtin.debug:
+        msg:
+          - "Skipping symlink: {{ klipper_home }}/printer_data/config already exists."
+          - "Current type: {{ printer_data_config_type | default('unknown') }}"
+          - "If you want to symlink it to {{ kossel_config_dir }}/config, move it aside and re-run this playbook."
+      when:
+        - manage_printer_data_config_symlink | bool
+        - printer_data_dir.stat.exists
+        - printer_data_config.stat.exists
+        - not (printer_data_config.stat.islnk and (printer_data_config.stat.lnk_source | default('')) == (kossel_config_dir + '/config'))
+
+    # ---- Wi-Fi stabilization (Pi-side, no UniFi changes) ----
+    - name: Ensure wpa_supplicant country is set
+      ansible.builtin.lineinfile:
+        path: /etc/wpa_supplicant/wpa_supplicant.conf
+        create: true
+        mode: "0600"
+        line: "country={{ wifi_country }}"
+        insertafter: BOF
+      when: wifi_manage | bool
+      notify: restart_wpa
+
+    - name: Configure Wi-Fi network block (optional)
+      ansible.builtin.blockinfile:
+        path: /etc/wpa_supplicant/wpa_supplicant.conf
+        marker: "# {mark} ANSIBLE MANAGED WIFI"
+        block: |
+          ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+          update_config=1
+
+          network={
+              ssid="{{ wifi_ssid }}"
+              psk="{{ wifi_psk }}"
+              {% if wifi_bssid | length > 0 %}bssid={{ wifi_bssid }}{% endif %}
+              {% if wifi_force_5ghz %}freq_list=5180 5200 5220 5240 5745 5765 5785 5805 5825{% endif %}
+          }
+      when: wifi_manage | bool and (wifi_psk | length > 0)
+      notify:
+        - restart_wpa
+        - restart_dhcpcd
+
+    - name: Install systemd unit to disable Wi-Fi power save at boot (recommended)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/wifi-powersave-off.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Disable Wi-Fi power save
+          After=network-pre.target
+          Wants=network-pre.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/sbin/iw dev wlan0 set power_save off
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      when: wifi_disable_powersave | bool
+      notify: reboot_if_needed
+
+    - name: Enable wifi-powersave-off service
+      ansible.builtin.systemd:
+        name: wifi-powersave-off.service
+        enabled: true
+        state: started
+      when: wifi_disable_powersave | bool
+      ignore_errors: true
+
+    # ---- Input shaper python deps ----
+    - name: Check if klippy virtualenv exists (after KIAUH install)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.stat:
+        path: "{{ klipper_home }}/klippy-env/bin/pip"
+      register: klippy_pip
+
+    - name: Install numpy+matplotlib into klippy-env (for shaper scripts/plots)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.command: >
+        {{ klipper_home }}/klippy-env/bin/pip install --upgrade pip numpy matplotlib
+      when: klippy_pip.stat.exists
+
+    - name: Reminder if klippy-env is missing
+      ansible.builtin.debug:
+        msg:
+          - "klippy-env not found at {{ klipper_home }}/klippy-env yet."
+          - "Install Klipper via KIAUH first, then re-run this playbook to add numpy/matplotlib."
+      when: not klippy_pip.stat.exists
