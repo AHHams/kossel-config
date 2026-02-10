@@ -1,6 +1,6 @@
 # Kossel Delta Printer - Klipper Configuration
 
-This repository contains the complete Klipper configuration for a Kossel 3D delta printer running on a Smoothieboard (LPC176x) with Mainsail interface.
+This repository contains the Klipper/Moonraker configuration for a Kossel delta printer (MKS SBASE v1.3 / LPC176x) running with Mainsail.
 
 ## Hardware Configuration
 
@@ -29,6 +29,11 @@ Main configuration file containing:
 - Display configuration
 - Current control via MCP4451 digipots
 
+### `moonraker.conf`
+Moonraker configuration file containing:
+- Klippy socket path
+- Update manager config (Mainsail + mainsail-config)
+
 ### `accelerometer.cfg`
 Accelerometer configuration for resonance testing:
 - FLY-ADXL345 USB accelerometer setup
@@ -40,15 +45,15 @@ Accelerometer configuration for resonance testing:
 ## Key Settings
 
 ### Delta Configuration
-- **Delta Radius**: 103.13mm (auto-calibrated)
+- **Delta Radius**: 103.174mm (auto-calibrated; see `SAVE_CONFIG`)
 - **Arm Length**: 208.1mm
 - **Print Radius**: 110mm
 - **Max Velocity**: 200mm/s
 - **Max Acceleration**: 10000mm/s²
 
 ### Input Shaping
-- **Type**: EI (Exponential Input)
-- **Frequency**: 38Hz (X and Y axes)
+- **Type**: MZV
+- **Frequency**: X=45.6Hz, Y=48.6Hz (see `SAVE_CONFIG`)
 
 ## Using The Accelerometer (Resonance Testing)
 
@@ -87,12 +92,12 @@ Disable it again when done (so Klipper will start without the sensor):
 - Restart Klipper
 
 ### Probe Settings
-- **Z Offset**: 24.5mm
+- **Z Offset**: 24.33mm (see `SAVE_CONFIG`)
 - **Speed**: 5mm/s
 - **Samples**: 5 (median result)
 
 ### Extruder
-- **Pressure Advance**: 0.32
+- **Pressure Advance**: 0.28
 - **Smooth Time**: 0.04s
 - **Nozzle Diameter**: 0.4mm
 - **Filament Diameter**: 1.75mm
@@ -134,7 +139,48 @@ To calibrate the probe Z-offset:
    GET_PROBE
    ```
 
-**Current Z-offset**: 24.5mm (can be updated after calibration)
+**Current Z-offset**: 24.33mm (can be updated after calibration)
+
+## Installation / Layout
+
+This repo is intended to live at `~/kossel-config` on the Raspberry Pi, and you symlink Klipper's config directory to the repo.
+
+Expected on the Pi:
+- Repo: `/home/anthony/kossel-config`
+- Mainsail macros: `/home/anthony/mainsail-config/mainsail.cfg`
+- Klipper config directory: `/home/anthony/printer_data/config` (symlink to `/home/anthony/kossel-config/config`)
+
+Note: `config/printer.cfg` includes Mainsail macros via an absolute path:
+- `config/printer.cfg` includes `/home/anthony/mainsail-config/mainsail.cfg`
+
+### Provisioning (Ansible + KIAUH)
+
+KIAUH is interactive, so the normal flow is:
+
+1) Flash the Pi and enable SSH + Wi-Fi (Raspberry Pi Imager).
+2) Run the Ansible playbook (installs packages, stabilizes Wi-Fi, clones KIAUH and this repo, installs opencode):
+
+```bash
+ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klipper-setup.yml
+```
+
+Notes:
+- The playbook forwards your SSH agent so the Pi can clone `git@github.com:...` without storing your private key on the Pi.
+- Wi-Fi credentials are assumed to be provisioned by the imager; the playbook only applies Wi-Fi stability tuning by default.
+
+3) Run KIAUH on the Pi and install Klipper/Moonraker/Mainsail:
+
+```bash
+ssh anthony@klipper.lan
+cd ~/kiauh
+./kiauh.sh
+```
+
+4) Re-run the playbook to create the `printer_data/config` symlink (KIAUH creates `~/printer_data`):
+
+```bash
+ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klipper-setup.yml
+```
 
 ## Maintenance
 
