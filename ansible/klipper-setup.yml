@@ -5,6 +5,11 @@
   gather_facts: true
 
   vars:
+    # Forward SSH agent so the Pi can clone via git@github.com without storing
+    # your private key on the Pi. Requires your local ssh-agent to have a key
+    # loaded that has access to the repo.
+    ansible_ssh_common_args: "-o ForwardAgent=yes"
+
     klipper_user: "anthony"
     klipper_home: "/home/{{ klipper_user }}"
     kiauh_dir: "{{ klipper_home }}/kiauh"
@@ -37,14 +42,24 @@
     wifi_psk: "_fGEx.PjM9wc"
     wifi_force_5ghz: true
     wifi_disable_powersave: true
-    # Reduce roaming aggressiveness.
-    nm_bgscan: "simple:120:-80:86400"
 
-    apt_packages:
-      - git
-      - curl
-      - wget
+    # Also disable Wake-on-WLAN for Wi-Fi.
+    wifi_disable_wake_on_wlan: true
+
+    # Packages needed for Wi-Fi + locale steps.
+    required_packages:
       - ca-certificates
+      - curl
+      - git
+      - locales
+      - netplan.io
+      - network-manager
+      - iw
+      - wpasupplicant
+
+    # Nice-to-have packages (install best-effort).
+    optional_packages:
+      - wget
       - unzip
       - rsync
       - vim
@@ -56,8 +71,6 @@
       - python3-venv
       - python3-dev
 
-      - locales
-
       - build-essential
       - pkg-config
       - cmake
@@ -67,7 +80,6 @@
       - gfortran
 
       - libopenblas-dev
-      - libatlas-base-dev
       - liblapack-dev
       - libffi-dev
       - libfreetype6-dev
@@ -78,12 +90,16 @@
 
       - cpufrequtils
 
-      # Wi-Fi tooling (Pi OS Lite is often minimal)
-      - network-manager
-      - iw
       - wireless-tools
-      - wpasupplicant
       - rfkill
+
+    # ---- APT upgrade ----
+    # Full upgrade can be noisy/slow on flaky Wi-Fi. Wi-Fi tuning runs before
+    # the full-upgrade to improve reliability.
+    install_packages: true
+    apt_do_full_upgrade: true
+    apt_full_upgrade_best_effort: false
+    apt_reboot_after_upgrade: false
 
   handlers:
     - name: reboot_if_needed
@@ -96,16 +112,13 @@
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
+      when: install_packages | bool
 
-    - name: apt full-upgrade
+    - name: Install required packages
       ansible.builtin.apt:
-        upgrade: full
-      register: upgrade_result
-
-    - name: Install baseline packages
-      ansible.builtin.apt:
-        name: "{{ apt_packages }}"
+        name: "{{ required_packages }}"
         state: present
+      when: install_packages | bool
 
     - name: Check available locales
       ansible.builtin.command: locale -a
@@ -117,15 +130,25 @@
         path: /etc/locale.gen
         regexp: '^#?\s*en_US\.UTF-8\s+UTF-8\s*$'
         line: 'en_US.UTF-8 UTF-8'
-      when: "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
+      when:
+        - "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
 
     - name: Generate locales
       ansible.builtin.command: locale-gen
-      when: "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
+      when:
+        - "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
 
     - name: Set default system locale
       ansible.builtin.command: "update-locale LANG={{ locale_lang | quote }}"
       changed_when: false
+
+    - name: Fix netplan library file permissions (avoid warnings)
+      ansible.builtin.file:
+        path: /lib/netplan/00-network-manager-all.yaml
+        owner: root
+        group: root
+        mode: "0644"
+      failed_when: false
 
     - name: Check if NetworkManager is active
       ansible.builtin.command: systemctl is-active NetworkManager
@@ -133,7 +156,14 @@
       changed_when: false
       failed_when: false
 
-    - name: Tune Wi-Fi connection via NetworkManager (5 GHz + less roaming)
+    - name: Ensure NetworkManager is running
+      ansible.builtin.systemd:
+        name: NetworkManager
+        enabled: true
+        state: started
+      when: nm_active.stdout | default('') != 'active'
+
+    - name: Tune Wi-Fi connection via NetworkManager (5 GHz + no powersave)
       become: true
       when:
         - wifi_manage | bool
@@ -172,16 +202,22 @@
             802-11-wireless.band a
           when: wifi_force_5ghz | bool
 
-        - name: Reduce roaming aggressiveness
-          ansible.builtin.command: >
-            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
-            802-11-wireless.bgscan {{ nm_bgscan | quote }}
-
         - name: Disable Wi-Fi power saving
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
             802-11-wireless.powersave 2
           when: wifi_disable_powersave | bool
+
+        - name: Disable Wake-on-WLAN for Wi-Fi
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless.wake-on-wlan 0
+          when: wifi_disable_wake_on_wlan | bool
+
+        - name: Disable Wi-Fi power saving immediately (runtime)
+          ansible.builtin.command: /sbin/iw dev wlan0 set power_save off
+          when: wifi_disable_powersave | bool
+          failed_when: false
 
         - name: Reapply connection settings to wlan0 (best-effort)
           ansible.builtin.command: nmcli device reapply wlan0
@@ -225,14 +261,6 @@
             line: '            password: "{{ wifi_psk }}"'
           register: netplan_password
 
-        - name: Persist roaming tuning in netplan
-          ansible.builtin.lineinfile:
-            path: "{{ netplan_wifi_file.stdout }}"
-            regexp: '^\s+wifi\.bgscan:'
-            line: '              wifi.bgscan: "{{ nm_bgscan }}"'
-            insertafter: '^\s+passthrough:\s*$'
-          register: netplan_bgscan
-
         - name: Persist Wi-Fi power saving setting in netplan
           ansible.builtin.lineinfile:
             path: "{{ netplan_wifi_file.stdout }}"
@@ -242,6 +270,15 @@
           when: wifi_disable_powersave | bool
           register: netplan_powersave
 
+        - name: Persist Wake-on-WLAN setting in netplan
+          ansible.builtin.lineinfile:
+            path: "{{ netplan_wifi_file.stdout }}"
+            regexp: '^\s+wifi\.wake-on-wlan:'
+            line: '              wifi.wake-on-wlan: "0"'
+            insertafter: '^\s+passthrough:\s*$'
+          when: wifi_disable_wake_on_wlan | bool
+          register: netplan_wol
+
         - name: Apply netplan (may briefly drop SSH)
           ansible.builtin.command: netplan apply
           async: 45
@@ -249,8 +286,8 @@
           when: >-
             (netplan_band is changed) or
             (netplan_password is changed) or
-            (netplan_bgscan is changed) or
-            (netplan_powersave is changed)
+            (netplan_powersave is changed) or
+            (netplan_wol is changed)
 
         - name: Wait for SSH after netplan apply
           ansible.builtin.wait_for_connection:
@@ -258,8 +295,80 @@
           when: >-
             (netplan_band is changed) or
             (netplan_password is changed) or
-            (netplan_bgscan is changed) or
-            (netplan_powersave is changed)
+            (netplan_powersave is changed) or
+            (netplan_wol is changed)
+
+        - name: Restart NetworkManager after netplan apply
+          ansible.builtin.command: systemctl restart NetworkManager
+          async: 45
+          poll: 0
+          changed_when: false
+          failed_when: false
+          when: >-
+            (netplan_band is changed) or
+            (netplan_password is changed) or
+            (netplan_powersave is changed) or
+            (netplan_wol is changed)
+
+        - name: Wait for SSH after NetworkManager restart
+          ansible.builtin.wait_for_connection:
+            timeout: 120
+          when: >-
+            (netplan_band is changed) or
+            (netplan_password is changed) or
+            (netplan_powersave is changed) or
+            (netplan_wol is changed)
+
+    - name: apt full-upgrade
+      ansible.builtin.apt:
+        upgrade: full
+      register: upgrade_result
+      retries: 3
+      delay: 15
+      until: upgrade_result is succeeded
+      when:
+        - install_packages | bool
+        - apt_do_full_upgrade | bool
+        - not (apt_full_upgrade_best_effort | bool)
+
+    - name: apt full-upgrade (best-effort)
+      when:
+        - install_packages | bool
+        - apt_do_full_upgrade | bool
+        - apt_full_upgrade_best_effort | bool
+      block:
+        - name: Run apt full-upgrade
+          ansible.builtin.apt:
+            upgrade: full
+          register: upgrade_result
+          retries: 3
+          delay: 15
+          until: upgrade_result is succeeded
+      rescue:
+        - name: Note full-upgrade failure and continue
+          ansible.builtin.debug:
+            msg:
+              - "apt full-upgrade failed (likely transient network). Continuing anyway."
+
+        - name: Mark upgrade as not changed
+          ansible.builtin.set_fact:
+            upgrade_result:
+              changed: false
+
+    - name: Install optional packages (best-effort)
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ optional_packages }}"
+      register: apt_optional_results
+      ignore_errors: true
+      when: install_packages | bool
+
+    - name: Note missing optional packages
+      ansible.builtin.debug:
+        msg: "Skipping missing package '{{ item.item }}': {{ item.msg | default('unknown error') }}"
+      loop: "{{ apt_optional_results.results | default([]) }}"
+      when: item.failed | default(false)
 
     - name: Configure git global identity for klipper_user
       become: true
@@ -356,7 +465,10 @@
       ansible.builtin.reboot:
         msg: "Reboot after apt full-upgrade"
         reboot_timeout: 600
-      when: upgrade_result is changed
+      when:
+        - apt_reboot_after_upgrade | bool
+        - upgrade_result is defined
+        - upgrade_result is changed
 
     # ---- KIAUH ----
     - name: Clone KIAUH
@@ -369,8 +481,7 @@
         update: true
 
     - name: Clone kossel-config
-      become: true
-      become_user: "{{ klipper_user }}"
+      become: false
       ansible.builtin.git:
         repo: "{{ kossel_config_repo }}"
         dest: "{{ kossel_config_dir }}"
