@@ -54,6 +54,7 @@
       - network-manager
       - iw
       - wpasupplicant
+      - zsh
 
     # Nice-to-have packages (install best-effort).
     optional_packages:
@@ -147,6 +148,18 @@
         group: root
         mode: "0644"
       failed_when: false
+
+    - name: Check if zsh is installed
+      ansible.builtin.stat:
+        path: /usr/bin/zsh
+      register: zsh_bin
+
+    - name: Set default shell to zsh for klipper_user
+      ansible.builtin.user:
+        name: "{{ klipper_user }}"
+        shell: /usr/bin/zsh
+        state: present
+      when: zsh_bin.stat.exists
 
     - name: Check if NetworkManager is active
       ansible.builtin.command: systemctl is-active NetworkManager
