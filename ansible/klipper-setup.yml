@@ -38,8 +38,12 @@
 
     # ---- Wi-Fi stabilization (NetworkManager) ----
     wifi_manage: true
-    wifi_ssid: "hams"
-    wifi_psk: "_fGEx.PjM9wc"
+    # By default, Raspberry Pi Imager provisions Wi-Fi credentials.
+    # Leave these blank and keep manage_wifi_credentials=false to avoid
+    # touching SSID/password from Ansible.
+    manage_wifi_credentials: false
+    wifi_ssid: ""
+    wifi_psk: ""
     wifi_force_5ghz: true
     wifi_disable_powersave: true
 
@@ -185,16 +189,22 @@
               - nm_wlan0_conn_name | length > 0
             fail_msg: "Could not determine active wlan0 connection name via nmcli"
 
-        - name: Ensure SSID matches
+        - name: Ensure SSID matches (optional)
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
             802-11-wireless.ssid {{ wifi_ssid | quote }}
+          when:
+            - manage_wifi_credentials | bool
+            - (wifi_ssid | length) > 0
 
-        - name: Ensure WPA2 PSK is set
+        - name: Ensure WPA2 PSK is set (optional)
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
             802-11-wireless-security.key-mgmt wpa-psk
             802-11-wireless-security.psk {{ wifi_psk | quote }}
+          when:
+            - manage_wifi_credentials | bool
+            - (wifi_psk | length) > 0
 
         - name: Force 5 GHz only
           ansible.builtin.command: >
@@ -254,12 +264,15 @@
           when: wifi_force_5ghz | bool
           register: netplan_band
 
-        - name: Persist Wi-Fi password in netplan
+        - name: Persist Wi-Fi password in netplan (optional)
           ansible.builtin.lineinfile:
             path: "{{ netplan_wifi_file.stdout }}"
             regexp: '^\s+password:'
             line: '            password: "{{ wifi_psk }}"'
           register: netplan_password
+          when:
+            - manage_wifi_credentials | bool
+            - (wifi_psk | length) > 0
 
         - name: Persist Wi-Fi power saving setting in netplan
           ansible.builtin.lineinfile:
@@ -285,7 +298,7 @@
           poll: 0
           when: >-
             (netplan_band is changed) or
-            (netplan_password is changed) or
+            ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
 
@@ -294,7 +307,7 @@
             timeout: 120
           when: >-
             (netplan_band is changed) or
-            (netplan_password is changed) or
+            ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
 
@@ -306,7 +319,7 @@
           failed_when: false
           when: >-
             (netplan_band is changed) or
-            (netplan_password is changed) or
+            ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
 
@@ -315,7 +328,7 @@
             timeout: 120
           when: >-
             (netplan_band is changed) or
-            (netplan_password is changed) or
+            ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
 
