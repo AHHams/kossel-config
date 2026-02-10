@@ -44,7 +44,6 @@
     manage_wifi_credentials: false
     wifi_ssid: ""
     wifi_psk: ""
-    wifi_force_5ghz: true
     wifi_disable_powersave: true
 
     # Also disable Wake-on-WLAN for Wi-Fi.
@@ -206,12 +205,6 @@
             - manage_wifi_credentials | bool
             - (wifi_psk | length) > 0
 
-        - name: Force 5 GHz only
-          ansible.builtin.command: >
-            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
-            802-11-wireless.band a
-          when: wifi_force_5ghz | bool
-
         - name: Disable Wi-Fi power saving
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
@@ -255,15 +248,6 @@
               - netplan_wifi_file.stdout | length > 0
             fail_msg: "Could not find /etc/netplan YAML for wlan0 connection"
 
-        - name: Persist 5 GHz only in netplan
-          ansible.builtin.lineinfile:
-            path: "{{ netplan_wifi_file.stdout }}"
-            regexp: '^\s+wifi\.band:'
-            line: '              wifi.band: "a"'
-            insertafter: '^\s+passthrough:\s*$'
-          when: wifi_force_5ghz | bool
-          register: netplan_band
-
         - name: Persist Wi-Fi password in netplan (optional)
           ansible.builtin.lineinfile:
             path: "{{ netplan_wifi_file.stdout }}"
@@ -297,7 +281,6 @@
           async: 45
           poll: 0
           when: >-
-            (netplan_band is changed) or
             ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
@@ -306,7 +289,6 @@
           ansible.builtin.wait_for_connection:
             timeout: 120
           when: >-
-            (netplan_band is changed) or
             ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
@@ -318,7 +300,6 @@
           changed_when: false
           failed_when: false
           when: >-
-            (netplan_band is changed) or
             ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
@@ -327,7 +308,6 @@
           ansible.builtin.wait_for_connection:
             timeout: 120
           when: >-
-            (netplan_band is changed) or
             ((netplan_password is defined) and (netplan_password is changed)) or
             (netplan_powersave is changed) or
             (netplan_wol is changed)
