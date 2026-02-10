@@ -16,14 +16,14 @@
     manage_printer_data_config_symlink: true
 
     # ---- Git identity ----
-    # NOTE: I am intentionally not applying these automatically.
-    # <git config lines here>
-    #   git config --global user.name "Anthony Hams"
-    #   git config --global user.email "anthony@hams.nl"
+    manage_git_identity: true
+    git_user_name: "Anthony Hams"
+    git_user_email: "anthony@hams.nl"
 
     # ---- OpenCode (opencode) ----
-    # Installs a prebuilt binary into ~/.local/bin for the klipper_user.
     opencode_install: true
+    opencode_install_method: "official_script"  # "official_script" or "skip"
+    opencode_force_install: false
 
     # KIAUH is interactive; keep this false for reliability.
     kiauh_auto_install: false
@@ -32,9 +32,18 @@
     wifi_manage: true
     wifi_country: "MX"
     wifi_ssid: "hams"
+    # Leave blank in-repo; provide via Ansible Vault or --extra-vars.
+    # Example: ansible-playbook ... -e 'wifi_psk=YOUR_PASSWORD'
     wifi_psk: ""              # set to your plaintext WPA2 password if you want Ansible to manage Wi-Fi
     wifi_bssid: ""            # optional: pin to AP MAC like "60:22:32:20:64:a3"
     wifi_force_5ghz: true     # uses freq_list to prefer 5 GHz
+    # Common 5 GHz channels (incl. DFS). If your UniFi selects a channel not
+    # in this list, wpa_supplicant may not connect when wifi_force_5ghz is true.
+    wifi_5ghz_freq_list: >-
+      5180 5200 5220 5240
+      5260 5280 5300 5320
+      5500 5520 5540 5560 5580 5600 5620 5640 5660 5680 5700 5720
+      5745 5765 5785 5805 5825
     wifi_disable_powersave: true
 
     apt_packages:
@@ -113,58 +122,44 @@
         name: "{{ apt_packages }}"
         state: present
 
-    - name: Determine opencode release arch
-      ansible.builtin.set_fact:
-        opencode_arch: >-
-          {{
-            'arm64' if ansible_architecture in ['aarch64', 'arm64'] else
-            ('x86_64' if ansible_architecture in ['x86_64', 'amd64'] else
-            ('i386' if ansible_architecture in ['i386', 'i686'] else ansible_architecture))
-          }}
-      when: opencode_install | bool
-
-    - name: Install opencode (binary release)
+    - name: Configure git global identity for klipper_user
       become: true
       become_user: "{{ klipper_user }}"
-      block:
-        - name: Ensure ~/.local/bin exists
-          ansible.builtin.file:
-            path: "{{ klipper_home }}/.local/bin"
-            state: directory
-            mode: "0755"
+      ansible.builtin.command: "git config --global user.name {{ git_user_name | quote }}"
+      changed_when: false
+      when: manage_git_identity | bool
 
-        - name: Download opencode release tarball
-          ansible.builtin.get_url:
-            url: "https://github.com/opencode-ai/opencode/releases/latest/download/opencode-linux-{{ opencode_arch }}.tar.gz"
-            dest: "/tmp/opencode-linux-{{ opencode_arch }}.tar.gz"
-            mode: "0644"
+    - name: Configure git global email for klipper_user
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.command: "git config --global user.email {{ git_user_email | quote }}"
+      changed_when: false
+      when: manage_git_identity | bool
 
-        - name: Unpack opencode
-          ansible.builtin.unarchive:
-            src: "/tmp/opencode-linux-{{ opencode_arch }}.tar.gz"
-            dest: "/tmp/opencode-unpack"
-            remote_src: true
-
-        - name: Install opencode into ~/.local/bin
-          ansible.builtin.copy:
-            src: "/tmp/opencode-unpack/opencode"
-            dest: "{{ klipper_home }}/.local/bin/opencode"
-            mode: "0755"
-            remote_src: true
+    - name: Check if opencode is already installed (official path)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.stat:
+        path: "{{ klipper_home }}/.opencode/bin/opencode"
+      register: opencode_official
       when:
         - opencode_install | bool
-        - opencode_arch in ['arm64', 'x86_64', 'i386']
+        - opencode_install_method == 'official_script'
 
-    - name: Note if opencode arch is unsupported
-      ansible.builtin.debug:
-        msg:
-          - "Skipping opencode install: unsupported architecture '{{ ansible_architecture }}'."
-          - "Arch mapping: '{{ opencode_arch | default('unset') }}'"
-          - "Supported by upstream releases: arm64, x86_64, i386."
+    - name: Install opencode (official installer)
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -fsSL https://opencode.ai/install | bash
+      args:
+        executable: /bin/bash
+      environment:
+        SHELL: /bin/bash
       when:
         - opencode_install | bool
-        - opencode_arch is defined
-        - opencode_arch not in ['arm64', 'x86_64', 'i386']
+        - opencode_install_method == 'official_script'
+        - opencode_force_install | bool or not opencode_official.stat.exists
 
     # ---- SD longevity / stability ----
     - name: Disable swap service
@@ -340,7 +335,7 @@
               ssid="{{ wifi_ssid }}"
               psk="{{ wifi_psk }}"
               {% if wifi_bssid | length > 0 %}bssid={{ wifi_bssid }}{% endif %}
-              {% if wifi_force_5ghz %}freq_list=5180 5200 5220 5240 5745 5765 5785 5805 5825{% endif %}
+              {% if wifi_force_5ghz %}freq_list={{ wifi_5ghz_freq_list }}{% endif %}
           }
       when: wifi_manage | bool and (wifi_psk | length > 0)
       notify:
