@@ -25,26 +25,20 @@
     opencode_install_method: "official_script"  # "official_script" or "skip"
     opencode_force_install: false
 
+    # ---- Locale ----
+    locale_lang: "en_US.UTF-8"
+
     # KIAUH is interactive; keep this false for reliability.
     kiauh_auto_install: false
 
-    # ---- Wi-Fi stabilization (Pi-side) ----
+    # ---- Wi-Fi stabilization (NetworkManager) ----
     wifi_manage: true
-    wifi_country: "MX"
     wifi_ssid: "hams"
-    # Leave blank in-repo; provide via Ansible Vault or --extra-vars.
-    # Example: ansible-playbook ... -e 'wifi_psk=YOUR_PASSWORD'
-    wifi_psk: ""              # set to your plaintext WPA2 password if you want Ansible to manage Wi-Fi
-    wifi_bssid: ""            # optional: pin to AP MAC like "60:22:32:20:64:a3"
-    wifi_force_5ghz: true     # uses freq_list to prefer 5 GHz
-    # Common 5 GHz channels (incl. DFS). If your UniFi selects a channel not
-    # in this list, wpa_supplicant may not connect when wifi_force_5ghz is true.
-    wifi_5ghz_freq_list: >-
-      5180 5200 5220 5240
-      5260 5280 5300 5320
-      5500 5520 5540 5560 5580 5600 5620 5640 5660 5680 5700 5720
-      5745 5765 5785 5805 5825
+    wifi_psk: "_fGEx.PjM9wc"
+    wifi_force_5ghz: true
     wifi_disable_powersave: true
+    # Reduce roaming aggressiveness.
+    nm_bgscan: "simple:120:-80:86400"
 
     apt_packages:
       - git
@@ -61,6 +55,8 @@
       - python3-pip
       - python3-venv
       - python3-dev
+
+      - locales
 
       - build-essential
       - pkg-config
@@ -83,24 +79,13 @@
       - cpufrequtils
 
       # Wi-Fi tooling (Pi OS Lite is often minimal)
+      - network-manager
       - iw
       - wireless-tools
       - wpasupplicant
       - rfkill
 
   handlers:
-    - name: restart_wpa
-      ansible.builtin.systemd:
-        name: wpa_supplicant
-        state: restarted
-      ignore_errors: true
-
-    - name: restart_dhcpcd
-      ansible.builtin.systemd:
-        name: dhcpcd
-        state: restarted
-      ignore_errors: true
-
     - name: reboot_if_needed
       ansible.builtin.reboot:
         msg: "Reboot initiated by Ansible"
@@ -121,6 +106,160 @@
       ansible.builtin.apt:
         name: "{{ apt_packages }}"
         state: present
+
+    - name: Check available locales
+      ansible.builtin.command: locale -a
+      register: locale_list
+      changed_when: false
+
+    - name: Ensure en_US.UTF-8 is enabled in locale.gen
+      ansible.builtin.lineinfile:
+        path: /etc/locale.gen
+        regexp: '^#?\s*en_US\.UTF-8\s+UTF-8\s*$'
+        line: 'en_US.UTF-8 UTF-8'
+      when: "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
+
+    - name: Generate locales
+      ansible.builtin.command: locale-gen
+      when: "'en_US.utf8' not in (locale_list.stdout_lines | default([]))"
+
+    - name: Set default system locale
+      ansible.builtin.command: "update-locale LANG={{ locale_lang | quote }}"
+      changed_when: false
+
+    - name: Check if NetworkManager is active
+      ansible.builtin.command: systemctl is-active NetworkManager
+      register: nm_active
+      changed_when: false
+      failed_when: false
+
+    - name: Tune Wi-Fi connection via NetworkManager (5 GHz + less roaming)
+      become: true
+      when:
+        - wifi_manage | bool
+        - (wifi_psk | length) > 0
+        - nm_active.stdout | default('') == 'active'
+      block:
+        - name: Get active wlan0 connection name
+          ansible.builtin.command: nmcli -t -f GENERAL.CONNECTION dev show wlan0
+          register: nm_wlan0_conn
+          changed_when: false
+
+        - name: Set active wlan0 connection fact
+          ansible.builtin.set_fact:
+            nm_wlan0_conn_name: "{{ (nm_wlan0_conn.stdout | default('') | regex_replace('^GENERAL\\.CONNECTION:', '')).strip() }}"
+
+        - name: Ensure wlan0 connection is present
+          ansible.builtin.assert:
+            that:
+              - nm_wlan0_conn_name | length > 0
+            fail_msg: "Could not determine active wlan0 connection name via nmcli"
+
+        - name: Ensure SSID matches
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless.ssid {{ wifi_ssid | quote }}
+
+        - name: Ensure WPA2 PSK is set
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless-security.key-mgmt wpa-psk
+            802-11-wireless-security.psk {{ wifi_psk | quote }}
+
+        - name: Force 5 GHz only
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless.band a
+          when: wifi_force_5ghz | bool
+
+        - name: Reduce roaming aggressiveness
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless.bgscan {{ nm_bgscan | quote }}
+
+        - name: Disable Wi-Fi power saving
+          ansible.builtin.command: >
+            nmcli connection modify {{ nm_wlan0_conn_name | quote }}
+            802-11-wireless.powersave 2
+          when: wifi_disable_powersave | bool
+
+        - name: Reapply connection settings to wlan0 (best-effort)
+          ansible.builtin.command: nmcli device reapply wlan0
+          changed_when: false
+          failed_when: false
+
+        - name: Get active wlan0 connection UUID
+          ansible.builtin.command: nmcli -g connection.uuid connection show {{ nm_wlan0_conn_name | quote }}
+          register: nm_wlan0_uuid
+          changed_when: false
+
+        - name: Find netplan file for active wlan0 connection
+          ansible.builtin.shell: |
+            set -euo pipefail
+            uuid={{ nm_wlan0_uuid.stdout | quote }}
+            grep -rl "$uuid" /etc/netplan/*.yaml | head -n 1
+          args:
+            executable: /bin/bash
+          register: netplan_wifi_file
+          changed_when: false
+
+        - name: Ensure netplan file is found
+          ansible.builtin.assert:
+            that:
+              - netplan_wifi_file.stdout | length > 0
+            fail_msg: "Could not find /etc/netplan YAML for wlan0 connection"
+
+        - name: Persist 5 GHz only in netplan
+          ansible.builtin.lineinfile:
+            path: "{{ netplan_wifi_file.stdout }}"
+            regexp: '^\s+wifi\.band:'
+            line: '              wifi.band: "a"'
+            insertafter: '^\s+passthrough:\s*$'
+          when: wifi_force_5ghz | bool
+          register: netplan_band
+
+        - name: Persist Wi-Fi password in netplan
+          ansible.builtin.lineinfile:
+            path: "{{ netplan_wifi_file.stdout }}"
+            regexp: '^\s+password:'
+            line: '            password: "{{ wifi_psk }}"'
+          register: netplan_password
+
+        - name: Persist roaming tuning in netplan
+          ansible.builtin.lineinfile:
+            path: "{{ netplan_wifi_file.stdout }}"
+            regexp: '^\s+wifi\.bgscan:'
+            line: '              wifi.bgscan: "{{ nm_bgscan }}"'
+            insertafter: '^\s+passthrough:\s*$'
+          register: netplan_bgscan
+
+        - name: Persist Wi-Fi power saving setting in netplan
+          ansible.builtin.lineinfile:
+            path: "{{ netplan_wifi_file.stdout }}"
+            regexp: '^\s+wifi\.powersave:'
+            line: '              wifi.powersave: "2"'
+            insertafter: '^\s+passthrough:\s*$'
+          when: wifi_disable_powersave | bool
+          register: netplan_powersave
+
+        - name: Apply netplan (may briefly drop SSH)
+          ansible.builtin.command: netplan apply
+          async: 45
+          poll: 0
+          when: >-
+            (netplan_band is changed) or
+            (netplan_password is changed) or
+            (netplan_bgscan is changed) or
+            (netplan_powersave is changed)
+
+        - name: Wait for SSH after netplan apply
+          ansible.builtin.wait_for_connection:
+            timeout: 120
+          when: >-
+            (netplan_band is changed) or
+            (netplan_password is changed) or
+            (netplan_bgscan is changed) or
+            (netplan_powersave is changed)
 
     - name: Configure git global identity for klipper_user
       become: true
@@ -311,64 +450,6 @@
         - printer_data_dir.stat.exists
         - printer_data_config.stat.exists
         - not (printer_data_config.stat.islnk and (printer_data_config.stat.lnk_source | default('')) == (kossel_config_dir + '/config'))
-
-    # ---- Wi-Fi stabilization (Pi-side, no UniFi changes) ----
-    - name: Ensure wpa_supplicant country is set
-      ansible.builtin.lineinfile:
-        path: /etc/wpa_supplicant/wpa_supplicant.conf
-        create: true
-        mode: "0600"
-        line: "country={{ wifi_country }}"
-        insertafter: BOF
-      when: wifi_manage | bool
-      notify: restart_wpa
-
-    - name: Configure Wi-Fi network block (optional)
-      ansible.builtin.blockinfile:
-        path: /etc/wpa_supplicant/wpa_supplicant.conf
-        marker: "# {mark} ANSIBLE MANAGED WIFI"
-        block: |
-          ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-          update_config=1
-
-          network={
-              ssid="{{ wifi_ssid }}"
-              psk="{{ wifi_psk }}"
-              {% if wifi_bssid | length > 0 %}bssid={{ wifi_bssid }}{% endif %}
-              {% if wifi_force_5ghz %}freq_list={{ wifi_5ghz_freq_list }}{% endif %}
-          }
-      when: wifi_manage | bool and (wifi_psk | length > 0)
-      notify:
-        - restart_wpa
-        - restart_dhcpcd
-
-    - name: Install systemd unit to disable Wi-Fi power save at boot (recommended)
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/wifi-powersave-off.service
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Disable Wi-Fi power save
-          After=network-pre.target
-          Wants=network-pre.target
-
-          [Service]
-          Type=oneshot
-          ExecStart=/sbin/iw dev wlan0 set power_save off
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-      when: wifi_disable_powersave | bool
-      notify: reboot_if_needed
-
-    - name: Enable wifi-powersave-off service
-      ansible.builtin.systemd:
-        name: wifi-powersave-off.service
-        enabled: true
-        state: started
-      when: wifi_disable_powersave | bool
-      ignore_errors: true
 
     # ---- Input shaper python deps ----
     - name: Check if klippy virtualenv exists (after KIAUH install)
