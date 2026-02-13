@@ -40,6 +40,18 @@ Accelerometer configuration for resonance testing:
 - Resonance testing configuration
 - Reference: [Mellow USB Accelerometer ADXL345 Documentation](https://mellow.klipper.cn/en/docs/category/usb%E5%8A%A0%E9%80%9F%E5%BA%A6%E8%AE%A1adxl345)
 
+### `macros.cfg`
+Convenience macros for common calibration tasks:
+- `RUN_PROBE_CALIBRATE`
+- `RUN_PROBE_ACCURACY`
+- `RUN_BASIC_DELTA_CALIBRATE`
+
+### `delta_analyze_enhanced.cfg`
+Macro wrapper for Klipper enhanced delta calibration:
+- `DELTA_ANALYZE_ENHANCED`
+- Stores the `DELTA_ANALYZE` measurement commands in one place
+- Runs `DELTA_ANALYZE CALIBRATE=extended` with your recorded measurements
+
 
 
 ## Key Settings
@@ -185,9 +197,42 @@ ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klip
 ## Maintenance
 
 - Run `DELTA_CALIBRATE` command if tower positions change
+- Run `DELTA_ANALYZE_ENHANCED` after printing/measuring `calibrate_size.stl` for dimensional tuning
 - Use `TEST_RESONANCES` with accelerometer for input shaping updates
 - Re-tune PID values if temperature control issues occur
 - Update probe Z-offset if bed leveling accuracy degrades
+
+## Delta Calibration Workflows
+
+### Basic delta calibration
+
+Use either direct command or convenience macro:
+
+```gcode
+DELTA_CALIBRATE
+SAVE_CONFIG
+```
+
+or:
+
+```gcode
+RUN_BASIC_DELTA_CALIBRATE
+SAVE_CONFIG
+```
+
+### Enhanced delta calibration (DELTA_ANALYZE)
+
+1. Print `calibrate_size.stl` from the Klipper docs.
+2. Measure center distances, outer distances, center pillar widths, and outer pillar widths.
+3. Update values in `config/delta_analyze_enhanced.cfg`.
+4. Run:
+
+```gcode
+DELTA_ANALYZE_ENHANCED
+SAVE_CONFIG
+```
+
+Note: The enhanced measurements are only valid for the current config state. If you rerun `DELTA_CALIBRATE` or otherwise change delta geometry, reprint and remeasure before running enhanced calibration again.
 
 ## Filament Runout
 
