@@ -321,31 +321,6 @@
         update: true
       when: install_klipperscreen | bool
 
-    - name: Ensure Moonraker update manager entry for KlipperScreen
-      ansible.builtin.blockinfile:
-        path: "{{ klipper_home }}/printer_data/config/moonraker.conf"
-        marker: "# {mark} ANSIBLE MANAGED KLIPPERSCREEN"
-        insertbefore: "# Crowsnest update_manager entry"
-        block: |
-          [update_manager KlipperScreen]
-          type: git_repo
-          path: {{ klipperscreen_dir }}
-          origin: https://github.com/KlipperScreen/KlipperScreen.git
-          virtualenv: {{ klipper_home }}/.KlipperScreen-env
-          requirements: scripts/KlipperScreen-requirements.txt
-          system_dependencies: scripts/system-dependencies.json
-          managed_services: KlipperScreen
-      register: klipperscreen_moonraker_block
-      when: install_klipperscreen | bool
-
-    - name: Restart Moonraker after KlipperScreen config update
-      ansible.builtin.systemd:
-        name: moonraker
-        state: restarted
-      when:
-        - install_klipperscreen | bool
-        - klipperscreen_moonraker_block is changed
-
     - name: Check if KlipperScreen service file exists
       ansible.builtin.stat:
         path: /etc/systemd/system/KlipperScreen.service
