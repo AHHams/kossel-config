@@ -1,51 +1,36 @@
 ---
-- name: Prepare Raspberry Pi OS Lite for Klipper and stabilize Wi-Fi
+- name: Apply kossel host customizations
   hosts: klipper
   become: true
   gather_facts: true
 
   vars:
-    # Forward SSH agent so the Pi can clone via git@github.com without storing
-    # your private key on the Pi. Requires your local ssh-agent to have a key
-    # loaded that has access to the repo.
+    # Use the local SSH agent for private repo access.
     ansible_ssh_common_args: "-o ForwardAgent=yes"
 
     klipper_user: "anthony"
     klipper_home: "/home/{{ klipper_user }}"
-    kiauh_dir: "{{ klipper_home }}/kiauh"
 
-    # ---- This repo (kossel-config) ----
     kossel_config_repo: "git@github.com:AHHams/kossel-config.git"
     kossel_config_version: "main"
     kossel_config_dir: "{{ klipper_home }}/kossel-config"
-    manage_printer_data_config_symlink: true
+    printer_data_config_backup_suffix: ".pre-kossel-config"
 
-    # ---- Git identity ----
     manage_git_identity: true
     git_user_name: "Anthony Hams"
     git_user_email: "anthony@hams.nl"
 
-    # ---- Locale ----
     locale_lang: "en_US.UTF-8"
 
-    # KIAUH is interactive; keep this false for reliability.
-    kiauh_auto_install: false
-
-    # ---- Wi-Fi stabilization (NetworkManager) ----
     wifi_manage: true
-    # By default, Raspberry Pi Imager provisions Wi-Fi credentials.
-    # Leave these blank and keep manage_wifi_credentials=false to avoid
-    # touching SSID/password from Ansible.
+    # Leave credentials off unless this playbook should manage them too.
     manage_wifi_credentials: false
     wifi_ssid: ""
     wifi_psk: ""
     wifi_disable_powersave: true
-
-    # Also disable Wake-on-WLAN for Wi-Fi.
     wifi_disable_wake_on_wlan: true
 
-    # Packages needed for Wi-Fi + locale steps.
-    required_packages:
+    packages:
       - ca-certificates
       - curl
       - git
@@ -55,9 +40,6 @@
       - iw
       - wpasupplicant
       - zsh
-
-    # Nice-to-have packages (install best-effort).
-    optional_packages:
       - wget
       - unzip
       - rsync
@@ -65,46 +47,19 @@
       - htop
       - tmux
 
-      - python3
-      - python3-pip
-      - python3-venv
-      - python3-dev
+    set_zsh_as_default_shell: true
 
-      - build-essential
-      - pkg-config
-      - cmake
-      - make
-      - gcc
-      - g++
-      - gfortran
-
-      - libopenblas-dev
-      - liblapack-dev
-      - libffi-dev
-      - libfreetype6-dev
-      - libpng-dev
-
-      - libusb-1.0-0
-      - libusb-1.0-0-dev
-
-      - cpufrequtils
-
-      - wireless-tools
-      - rfkill
-
-    # ---- APT upgrade ----
-    # Full upgrade can be noisy/slow on flaky Wi-Fi. Wi-Fi tuning runs before
-    # the full-upgrade to improve reliability.
     install_packages: true
     apt_do_full_upgrade: true
-    apt_full_upgrade_best_effort: false
     apt_reboot_after_upgrade: false
 
-  handlers:
-    - name: reboot_if_needed
-      ansible.builtin.reboot:
-        msg: "Reboot initiated by Ansible"
-        reboot_timeout: 600
+    install_klipperscreen: true
+    klipperscreen_repo: "https://github.com/KlipperScreen/KlipperScreen.git"
+    klipperscreen_version: "master"
+    klipperscreen_dir: "{{ klipper_home }}/KlipperScreen"
+    klipperscreen_backend: "X"
+    klipperscreen_install_network_manager: "n"
+    klipperscreen_start_after_install: "1"
 
   tasks:
     - name: apt update
@@ -113,9 +68,9 @@
         cache_valid_time: 3600
       when: install_packages | bool
 
-    - name: Install required packages
+    - name: Install packages
       ansible.builtin.apt:
-        name: "{{ required_packages }}"
+        name: "{{ packages }}"
         state: present
       when: install_packages | bool
 
@@ -141,14 +96,6 @@
       ansible.builtin.command: "update-locale LANG={{ locale_lang | quote }}"
       changed_when: false
 
-    - name: Fix netplan library file permissions (avoid warnings)
-      ansible.builtin.file:
-        path: /lib/netplan/00-network-manager-all.yaml
-        owner: root
-        group: root
-        mode: "0644"
-      failed_when: false
-
     - name: Check if zsh is installed
       ansible.builtin.stat:
         path: /usr/bin/zsh
@@ -159,26 +106,20 @@
         name: "{{ klipper_user }}"
         shell: /usr/bin/zsh
         state: present
-      when: zsh_bin.stat.exists
-
-    - name: Check if NetworkManager is active
-      ansible.builtin.command: systemctl is-active NetworkManager
-      register: nm_active
-      changed_when: false
-      failed_when: false
+      when:
+        - zsh_bin.stat.exists
+        - set_zsh_as_default_shell | bool
 
     - name: Ensure NetworkManager is running
       ansible.builtin.systemd:
         name: NetworkManager
         enabled: true
         state: started
-      when: nm_active.stdout | default('') != 'active'
 
     - name: Tune Wi-Fi connection via NetworkManager (no powersave)
       become: true
       when:
         - wifi_manage | bool
-        - nm_active.stdout | default('') == 'active'
       block:
         - name: Get active wlan0 connection name
           ansible.builtin.command: nmcli -t -f GENERAL.CONNECTION dev show wlan0
@@ -203,6 +144,12 @@
             - manage_wifi_credentials | bool
             - (wifi_ssid | length) > 0
 
+        - name: Read current Wi-Fi powersave setting
+          ansible.builtin.command: >
+            nmcli -g 802-11-wireless.powersave connection show {{ nm_wlan0_conn_name | quote }}
+          register: nm_wifi_powersave
+          changed_when: false
+
         - name: Ensure WPA2 PSK is set (optional)
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
@@ -216,108 +163,34 @@
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
             802-11-wireless.powersave 2
-          when: wifi_disable_powersave | bool
+          when:
+            - wifi_disable_powersave | bool
+            - (nm_wifi_powersave.stdout | trim) != 'disable'
+
+        - name: Read current Wi-Fi wake-on-wlan setting
+          ansible.builtin.command: >
+            nmcli -g 802-11-wireless.wake-on-wlan connection show {{ nm_wlan0_conn_name | quote }}
+          register: nm_wifi_wowlan
+          changed_when: false
 
         - name: Disable Wake-on-WLAN for Wi-Fi
           ansible.builtin.command: >
             nmcli connection modify {{ nm_wlan0_conn_name | quote }}
             802-11-wireless.wake-on-wlan 0
-          when: wifi_disable_wake_on_wlan | bool
+          when:
+            - wifi_disable_wake_on_wlan | bool
+            - (nm_wifi_wowlan.stdout | trim) != '0x0'
 
         - name: Disable Wi-Fi power saving immediately (runtime)
           ansible.builtin.command: /sbin/iw dev wlan0 set power_save off
           when: wifi_disable_powersave | bool
+          changed_when: false
           failed_when: false
 
         - name: Reapply connection settings to wlan0 (best-effort)
           ansible.builtin.command: nmcli device reapply wlan0
           changed_when: false
           failed_when: false
-
-        - name: Get active wlan0 connection UUID
-          ansible.builtin.command: nmcli -g connection.uuid connection show {{ nm_wlan0_conn_name | quote }}
-          register: nm_wlan0_uuid
-          changed_when: false
-
-        - name: Find netplan file for active wlan0 connection
-          ansible.builtin.shell: |
-            set -euo pipefail
-            uuid={{ nm_wlan0_uuid.stdout | quote }}
-            grep -rl "$uuid" /etc/netplan/*.yaml | head -n 1
-          args:
-            executable: /bin/bash
-          register: netplan_wifi_file
-          changed_when: false
-
-        - name: Ensure netplan file is found
-          ansible.builtin.assert:
-            that:
-              - netplan_wifi_file.stdout | length > 0
-            fail_msg: "Could not find /etc/netplan YAML for wlan0 connection"
-
-        - name: Persist Wi-Fi password in netplan (optional)
-          ansible.builtin.lineinfile:
-            path: "{{ netplan_wifi_file.stdout }}"
-            regexp: '^\s+password:'
-            line: '            password: "{{ wifi_psk }}"'
-          register: netplan_password
-          when:
-            - manage_wifi_credentials | bool
-            - (wifi_psk | length) > 0
-
-        - name: Persist Wi-Fi power saving setting in netplan
-          ansible.builtin.lineinfile:
-            path: "{{ netplan_wifi_file.stdout }}"
-            regexp: '^\s+wifi\.powersave:'
-            line: '              wifi.powersave: "2"'
-            insertafter: '^\s+passthrough:\s*$'
-          when: wifi_disable_powersave | bool
-          register: netplan_powersave
-
-        - name: Persist Wake-on-WLAN setting in netplan
-          ansible.builtin.lineinfile:
-            path: "{{ netplan_wifi_file.stdout }}"
-            regexp: '^\s+wifi\.wake-on-wlan:'
-            line: '              wifi.wake-on-wlan: "0"'
-            insertafter: '^\s+passthrough:\s*$'
-          when: wifi_disable_wake_on_wlan | bool
-          register: netplan_wol
-
-        - name: Apply netplan (may briefly drop SSH)
-          ansible.builtin.command: netplan apply
-          async: 45
-          poll: 0
-          when: >-
-            ((netplan_password is defined) and (netplan_password is changed)) or
-            (netplan_powersave is changed) or
-            (netplan_wol is changed)
-
-        - name: Wait for SSH after netplan apply
-          ansible.builtin.wait_for_connection:
-            timeout: 120
-          when: >-
-            ((netplan_password is defined) and (netplan_password is changed)) or
-            (netplan_powersave is changed) or
-            (netplan_wol is changed)
-
-        - name: Restart NetworkManager after netplan apply
-          ansible.builtin.command: systemctl restart NetworkManager
-          async: 45
-          poll: 0
-          changed_when: false
-          failed_when: false
-          when: >-
-            ((netplan_password is defined) and (netplan_password is changed)) or
-            (netplan_powersave is changed) or
-            (netplan_wol is changed)
-
-        - name: Wait for SSH after NetworkManager restart
-          ansible.builtin.wait_for_connection:
-            timeout: 120
-          when: >-
-            ((netplan_password is defined) and (netplan_password is changed)) or
-            (netplan_powersave is changed) or
-            (netplan_wol is changed)
 
     - name: apt full-upgrade
       ansible.builtin.apt:
@@ -329,46 +202,6 @@
       when:
         - install_packages | bool
         - apt_do_full_upgrade | bool
-        - not (apt_full_upgrade_best_effort | bool)
-
-    - name: apt full-upgrade (best-effort)
-      when:
-        - install_packages | bool
-        - apt_do_full_upgrade | bool
-        - apt_full_upgrade_best_effort | bool
-      block:
-        - name: Run apt full-upgrade
-          ansible.builtin.apt:
-            upgrade: full
-          register: upgrade_result
-          retries: 3
-          delay: 15
-          until: upgrade_result is succeeded
-      rescue:
-        - name: Note full-upgrade failure and continue
-          ansible.builtin.debug:
-            msg:
-              - "apt full-upgrade failed (likely transient network). Continuing anyway."
-
-        - name: Mark upgrade as not changed
-          ansible.builtin.set_fact:
-            upgrade_result:
-              changed: false
-
-    - name: Install optional packages (best-effort)
-      ansible.builtin.apt:
-        name: "{{ item }}"
-        state: present
-      loop: "{{ optional_packages }}"
-      register: apt_optional_results
-      ignore_errors: true
-      when: install_packages | bool
-
-    - name: Note missing optional packages
-      ansible.builtin.debug:
-        msg: "Skipping missing package '{{ item.item }}': {{ item.msg | default('unknown error') }}"
-      loop: "{{ apt_optional_results.results | default([]) }}"
-      when: item.failed | default(false)
 
     - name: Configure git global identity for klipper_user
       become: true
@@ -397,45 +230,6 @@
       changed_when: false
       failed_when: false
 
-    - name: Limit journald size
-      ansible.builtin.file:
-        path: /etc/systemd/journald.conf.d
-        state: directory
-        mode: "0755"
-
-    - name: Write journald size limit
-      ansible.builtin.copy:
-        dest: /etc/systemd/journald.conf.d/size.conf
-        mode: "0644"
-        content: |
-          [Journal]
-          SystemMaxUse=50M
-
-    - name: Disable optional services (safe)
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        enabled: false
-        state: stopped
-      loop:
-        - triggerhappy
-        - avahi-daemon
-        - bluetooth
-      ignore_errors: true
-
-    - name: Set CPU governor to performance
-      ansible.builtin.copy:
-        dest: /etc/default/cpufrequtils
-        mode: "0644"
-        content: |
-          GOVERNOR="performance"
-
-    - name: Enable cpufrequtils
-      ansible.builtin.systemd:
-        name: cpufrequtils
-        enabled: true
-        state: started
-      ignore_errors: true
-
     - name: Reboot after upgrades (if needed)
       ansible.builtin.reboot:
         msg: "Reboot after apt full-upgrade"
@@ -445,32 +239,14 @@
         - upgrade_result is defined
         - upgrade_result is changed
 
-    # ---- KIAUH ----
-    - name: Clone KIAUH
-      become: true
-      become_user: "{{ klipper_user }}"
-      ansible.builtin.git:
-        repo: "https://github.com/dw-0/kiauh.git"
-        dest: "{{ kiauh_dir }}"
-        version: master
-        update: true
-
     - name: Clone kossel-config
       become: false
       ansible.builtin.git:
         repo: "{{ kossel_config_repo }}"
         dest: "{{ kossel_config_dir }}"
         version: "{{ kossel_config_version }}"
-        update: true
+        update: false
         accept_hostkey: true
-
-    - name: Optional note about running KIAUH
-      ansible.builtin.debug:
-        msg:
-          - "KIAUH cloned to {{ kiauh_dir }}."
-          - "Run manually: cd ~/kiauh && ./kiauh.sh (install Klipper, Moonraker, Mainsail)"
-          - "kossel-config cloned to {{ kossel_config_dir }}."
-      when: not (kiauh_auto_install | bool)
 
     - name: Check if printer_data exists (created by Klipper install)
       become: true
@@ -479,15 +255,13 @@
         path: "{{ klipper_home }}/printer_data"
         follow: false
       register: printer_data_dir
-      when: manage_printer_data_config_symlink | bool
 
     - name: Note about creating printer_data/config symlink
       ansible.builtin.debug:
         msg:
           - "{{ klipper_home }}/printer_data not found yet."
-          - "Install Klipper/Moonraker/Mainsail via KIAUH first, then re-run this playbook to create the config symlink."
+          - "MainsailOS should normally create this path during first boot."
       when:
-        - manage_printer_data_config_symlink | bool
         - not printer_data_dir.stat.exists
 
     - name: Check existing printer_data/config
@@ -498,7 +272,6 @@
         follow: false
       register: printer_data_config
       when:
-        - manage_printer_data_config_symlink | bool
         - printer_data_dir.stat.exists
 
     - name: Symlink printer_data/config to kossel-config/config (when missing)
@@ -509,52 +282,96 @@
         dest: "{{ klipper_home }}/printer_data/config"
         state: link
       when:
-        - manage_printer_data_config_symlink | bool
         - printer_data_dir.stat.exists
         - not printer_data_config.stat.exists
 
-    - name: Determine existing printer_data/config type
-      ansible.builtin.set_fact:
-        printer_data_config_type: >-
-          {{
-            'symlink' if printer_data_config.stat.islnk else
-            ('directory' if printer_data_config.stat.isdir else 'file')
-          }}
+    - name: Backup existing printer_data/config before replacing it
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ klipper_home }}/printer_data/config"
+          - "{{ klipper_home }}/printer_data/config{{ printer_data_config_backup_suffix }}"
       when:
-        - manage_printer_data_config_symlink | bool
-        - printer_data_dir.stat.exists
-        - printer_data_config.stat.exists
-
-    - name: Warn if printer_data/config exists and is not the expected symlink
-      ansible.builtin.debug:
-        msg:
-          - "Skipping symlink: {{ klipper_home }}/printer_data/config already exists."
-          - "Current type: {{ printer_data_config_type | default('unknown') }}"
-          - "If you want to symlink it to {{ kossel_config_dir }}/config, move it aside and re-run this playbook."
-      when:
-        - manage_printer_data_config_symlink | bool
         - printer_data_dir.stat.exists
         - printer_data_config.stat.exists
         - not (printer_data_config.stat.islnk and (printer_data_config.stat.lnk_source | default('')) == (kossel_config_dir + '/config'))
 
-    # ---- Input shaper python deps ----
-    - name: Check if klippy virtualenv exists (after KIAUH install)
+    - name: Symlink printer_data/config to kossel-config/config after backup
       become: true
       become_user: "{{ klipper_user }}"
+      ansible.builtin.file:
+        src: "{{ kossel_config_dir }}/config"
+        dest: "{{ klipper_home }}/printer_data/config"
+        state: link
+      when:
+        - printer_data_dir.stat.exists
+        - printer_data_config.stat.exists
+        - not (printer_data_config.stat.islnk and (printer_data_config.stat.lnk_source | default('')) == (kossel_config_dir + '/config'))
+
+    # ---- KlipperScreen ----
+    - name: Clone KlipperScreen
+      become: true
+      become_user: "{{ klipper_user }}"
+      ansible.builtin.git:
+        repo: "{{ klipperscreen_repo }}"
+        dest: "{{ klipperscreen_dir }}"
+        version: "{{ klipperscreen_version }}"
+        update: true
+      when: install_klipperscreen | bool
+
+    - name: Ensure Moonraker update manager entry for KlipperScreen
+      ansible.builtin.blockinfile:
+        path: "{{ klipper_home }}/printer_data/config/moonraker.conf"
+        marker: "# {mark} ANSIBLE MANAGED KLIPPERSCREEN"
+        insertbefore: "# Crowsnest update_manager entry"
+        block: |
+          [update_manager KlipperScreen]
+          type: git_repo
+          path: {{ klipperscreen_dir }}
+          origin: https://github.com/KlipperScreen/KlipperScreen.git
+          virtualenv: {{ klipper_home }}/.KlipperScreen-env
+          requirements: scripts/KlipperScreen-requirements.txt
+          system_dependencies: scripts/system-dependencies.json
+          managed_services: KlipperScreen
+      register: klipperscreen_moonraker_block
+      when: install_klipperscreen | bool
+
+    - name: Restart Moonraker after KlipperScreen config update
+      ansible.builtin.systemd:
+        name: moonraker
+        state: restarted
+      when:
+        - install_klipperscreen | bool
+        - klipperscreen_moonraker_block is changed
+
+    - name: Check if KlipperScreen service file exists
       ansible.builtin.stat:
-        path: "{{ klipper_home }}/klippy-env/bin/pip"
-      register: klippy_pip
+        path: /etc/systemd/system/KlipperScreen.service
+      register: klipperscreen_service_file
+      when: install_klipperscreen | bool
 
-    - name: Install numpy+matplotlib into klippy-env (for shaper scripts/plots)
+    - name: Install KlipperScreen non-interactively
       become: true
       become_user: "{{ klipper_user }}"
-      ansible.builtin.command: >
-        {{ klipper_home }}/klippy-env/bin/pip install --upgrade pip numpy matplotlib
-      when: klippy_pip.stat.exists
+      ansible.builtin.command:
+        argv:
+          - "{{ klipperscreen_dir }}/scripts/KlipperScreen-install.sh"
+      environment:
+        HOME: "{{ klipper_home }}"
+        USER: "{{ klipper_user }}"
+        SERVICE: "Y"
+        BACKEND: "{{ klipperscreen_backend }}"
+        NETWORK: "{{ klipperscreen_install_network_manager }}"
+        START: "{{ klipperscreen_start_after_install }}"
+      when:
+        - install_klipperscreen | bool
+        - not klipperscreen_service_file.stat.exists
 
-    - name: Reminder if klippy-env is missing
-      ansible.builtin.debug:
-        msg:
-          - "klippy-env not found at {{ klipper_home }}/klippy-env yet."
-          - "Install Klipper via KIAUH first, then re-run this playbook to add numpy/matplotlib."
-      when: not klippy_pip.stat.exists
+    - name: Ensure KlipperScreen service is enabled and running
+      ansible.builtin.systemd:
+        name: KlipperScreen
+        enabled: true
+        state: started
+      when: install_klipperscreen | bool

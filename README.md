@@ -165,34 +165,23 @@ Expected on the Pi:
 Note: `config/printer.cfg` includes Mainsail macros via an absolute path:
 - `config/printer.cfg` includes `/home/anthony/mainsail-config/mainsail.cfg`
 
-### Provisioning (Ansible + KIAUH)
+### Provisioning (MainsailOS + Ansible)
 
-KIAUH is interactive, so the normal flow is:
+The intended flow is now MainsailOS first, then a small Ansible pass to apply this repo.
 
-1) Flash the Pi and enable SSH + Wi-Fi (Raspberry Pi Imager).
-2) Run the Ansible playbook (installs packages, stabilizes Wi-Fi, clones KIAUH and this repo):
+1) Flash `MainsailOS` and enable SSH + Wi-Fi in Raspberry Pi Imager.
+2) Boot the Pi once and let first-boot provisioning finish.
+3) Run the Ansible playbook:
 
 ```bash
-ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klipper-setup.yml
+ansible-playbook ansible/klipper-setup.yml
 ```
 
 Notes:
 - The playbook forwards your SSH agent so the Pi can clone `git@github.com:...` without storing your private key on the Pi.
-- Wi-Fi credentials are assumed to be provisioned by the imager; the playbook only applies Wi-Fi stability tuning by default.
-
-3) Run KIAUH on the Pi and install Klipper/Moonraker/Mainsail:
-
-```bash
-ssh anthony@klipper.lan
-cd ~/kiauh
-./kiauh.sh
-```
-
-4) Re-run the playbook to create the `printer_data/config` symlink (KIAUH creates `~/printer_data`):
-
-```bash
-ansible-playbook -i klipper, -u anthony -e ansible_host=klipper.lan ansible/klipper-setup.yml
-```
+- `KlipperScreen` is installed by default as part of this playbook. Opt out with `-e install_klipperscreen=false`.
+- By default the playbook installs the standard utility packages in this repo, runs `apt full-upgrade`, configures `zsh`, applies the Wi-Fi tuning in the playbook, and links `printer_data/config` to this repo.
+- If `~/printer_data/config` already exists, the playbook backs it up to `~/printer_data/config.pre-kossel-config` and replaces it with a symlink to this repo.
 
 ## Maintenance
 
